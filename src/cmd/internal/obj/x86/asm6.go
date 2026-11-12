@@ -2184,7 +2184,7 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	var nops []nopPad // Padding for a particular assembly (reuse slice storage if multiple assemblies)
 	nrelocs0 := len(s.R)
 	smallLoopsMarked := false
-	var originalSlot int64
+	var originalAlignedSize int64
 	alignmentAttempted := false
 	var smallLoops map[*obj.Prog]*obj.Prog
 	for {
@@ -2277,16 +2277,16 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			if !smallLoopsMarked {
 				smallLoopsMarked = true
 				if !ctxt.IsAsm && ctxt.Arch.Family == sys.AMD64 {
-					originalSlot = (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
+					originalAlignedSize = (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
 					smallLoops, reAssemble = markSmallLoops(s)
 					alignmentAttempted = reAssemble
 				}
 			} else {
 				reAssemble = checkSmallLoops(smallLoops)
-				// amd64 functions are allocated in 32-byte slots by the linker.
-				// Use existing slack rather than moving unrelated functions.
-				slot := (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
-				if !reAssemble && alignmentAttempted && slot != originalSlot {
+				// Preserve the function size rounded up to the amd64 linker
+				// alignment, so padding does not move unrelated functions.
+				alignedSize := (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
+				if !reAssemble && alignmentAttempted && alignedSize != originalAlignedSize {
 					for p := s.Func().Text; p != nil; p = p.Link {
 						p.Back &^= branchLoopAlign
 						p.Back |= branchShort
