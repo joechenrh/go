@@ -7,12 +7,15 @@ package x86
 import (
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
+	"fmt"
 	"internal/testenv"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 type oclassTest struct {
@@ -346,5 +349,233 @@ func TestPCALIGN(t *testing.T) {
 		if !matched {
 			t.Errorf("The %s testing failed!\ninput: %s\noutput: %s\n", test.name, test.code, out)
 		}
+	}
+}
+
+// TestSmallLoopAlignment exercises the complete instruction-layout pass, rather
+// than depending on a particular Go function name or register allocation.
+func TestSmallLoopAlignment(t *testing.T) {
+	type testCase struct {
+		name          string
+		prefix        int
+		precedingLoop bool
+		fallsThrough  bool
+		isAsm         bool
+		calls         bool
+		singleExit    bool
+		longExit      bool
+		multiple      bool
+		wantAligned   bool
+		wantFit       bool
+		wantSize      int64
+		checkOnly     bool
+		mode32        bool
+		metadata      bool
+		entryAlias    bool
+		indirect      bool
+		explicit      bool
+		nested        bool
+		indexReg      int16
+		tail          int
+	}
+	tests := []testCase{
+		{name: "short rotated search", prefix: 29, wantAligned: true},
+		{name: "already fits window", prefix: 0},
+		{name: "preserve following fitting loop", prefix: 6, precedingLoop: true, wantAligned: true},
+		{name: "function footprint budget", prefix: 29, tail: 24, wantSize: 190},
+		{name: "extended index register", prefix: 29, indexReg: REG_R8, wantAligned: true},
+		{name: "zero width metadata", prefix: 29, metadata: true, wantAligned: true},
+		{name: "entry through metadata alias", prefix: 29, entryAlias: true},
+		{name: "indirect jump in loop", prefix: 29, indirect: true},
+		{name: "explicit alignment", prefix: 29, explicit: true},
+		{name: "nested loop", prefix: 29, nested: true},
+		{name: "386 unchanged", prefix: 23, mode32: true},
+		{name: "larger unreachable padding", prefix: 25, wantAligned: true},
+		{name: "fallthrough entry", prefix: 19, fallsThrough: true},
+		{name: "handwritten assembly", prefix: 29, isAsm: true},
+		{name: "call in loop", prefix: 29, calls: true},
+		{name: "single branch", prefix: 29, singleExit: true},
+		{name: "long exit", prefix: 29, longExit: true},
+		{name: "multiple backedges", prefix: 29, multiple: true},
+	}
+	for prefix := 0; prefix < 32; prefix++ {
+		tests = append(tests, testCase{name: fmt.Sprintf("offset/%d", prefix), prefix: prefix, wantFit: true})
+	}
+	for prefix := 0; prefix < 32; prefix++ {
+		for _, tail := range []int{24, 32, 40, 48, 56, 64} {
+			tests = append(tests, testCase{
+				name:      fmt.Sprintf("branch-span/%d/%d", prefix, tail),
+				prefix:    prefix,
+				tail:      tail,
+				checkOnly: true,
+			})
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			arch, inc, cmpAs, mode := &Linkamd64, AINCQ, ACMPQ, 64
+			if test.mode32 {
+				arch, inc, cmpAs, mode = &Link386, AINCL, ACMPL, 32
+			}
+			ctxt := obj.Linknew(arch)
+			ctxt.Headtype = objabi.Hlinux
+			ctxt.IsAsm = test.isAsm
+			ctxt.DiagFunc = t.Errorf
+			s := &obj.LSym{Name: "example.scan", Type: objabi.STEXT}
+			s.NewFuncInfo()
+			text := ctxt.NewProg()
+			text.As = obj.ATEXT
+			text.From = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: s}
+			text.To = obj.Addr{Type: obj.TYPE_TEXTSIZE, Val: int32(0)}
+			s.Func().Text = text
+			last := text
+			add := func(as obj.As) *obj.Prog {
+				p := ctxt.NewProg()
+				p.As = as
+				if as == obj.AJMP || as == AJLE || as == AJEQ || as == AJNE {
+					p.To.Type = obj.TYPE_BRANCH
+				}
+				last.Link = p
+				last = p
+				return p
+			}
+			reg := func(r int16) obj.Addr { return obj.Addr{Type: obj.TYPE_REG, Reg: r} }
+			for i := 0; i < test.prefix; i++ {
+				add(inc).To = reg(REG_AX)
+			}
+			var precedingExit *obj.Prog
+			if test.precedingLoop {
+				firstEntry := add(obj.AJMP)
+				firstHead := add(AINCQ)
+				firstHead.To = reg(REG_DX)
+				firstCmp := add(ACMPQ)
+				firstCmp.From, firstCmp.To = reg(REG_BX), reg(REG_DX)
+				firstEntry.To.SetTarget(firstCmp)
+				precedingExit = add(AJLE)
+				firstTest := add(ATESTQ)
+				firstTest.From, firstTest.To = reg(REG_AX), reg(REG_AX)
+				add(AJEQ).To.SetTarget(firstHead)
+			}
+			var alias *obj.Prog
+			if test.entryAlias {
+				alias = add(AJLE)
+			}
+			var entry *obj.Prog
+			if !test.fallsThrough {
+				entry = add(obj.AJMP)
+				if precedingExit != nil {
+					precedingExit.To.SetTarget(entry)
+				}
+			}
+			if alias != nil {
+				a := add(obj.APCDATA)
+				a.From.SetConst(0)
+				a.To.SetConst(-1)
+				alias.To.SetTarget(a)
+			}
+			var target *obj.Prog
+			if test.metadata {
+				target = add(obj.APCDATA)
+				target.From.SetConst(0)
+				target.To.SetConst(-1)
+			}
+			index := test.indexReg
+			if index == 0 {
+				index = REG_SI
+			}
+			head := add(inc)
+			head.To = reg(index)
+			if target == nil {
+				target = head
+			}
+			if test.explicit {
+				a := add(obj.APCALIGNMAX)
+				a.From.SetConst(64)
+				a.To.SetConst(31)
+			}
+			cmp := add(cmpAs)
+			cmp.From, cmp.To = reg(REG_BX), reg(index)
+			if entry != nil {
+				entry.To.SetTarget(cmp)
+			}
+			var exit *obj.Prog
+			if !test.singleExit {
+				exit = add(AJLE)
+			}
+			load := add(AMOVBLZX)
+			load.From = obj.Addr{Type: obj.TYPE_MEM, Reg: REG_AX, Index: index, Scale: 1}
+			load.To = reg(REG_DX)
+			if test.nested {
+				inner := add(ADECQ)
+				inner.To = reg(REG_R10)
+				add(AJNE).To.SetTarget(inner)
+			}
+			lookup := add(AMOVBLZX)
+			lookup.From = obj.Addr{Type: obj.TYPE_MEM, Reg: REG_SP, Index: REG_DX, Scale: 1, Offset: 0x12c}
+			lookup.To = reg(REG_DX)
+			if test.calls || test.nested || test.indirect {
+				lookup.From.Offset = 0
+			}
+			if test.calls {
+				call := add(obj.ACALL)
+				call.To = obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_EXTERN, Sym: ctxt.Lookup("example.callee")}
+			}
+			if test.indirect {
+				add(obj.AJMP).To = reg(REG_R11)
+			}
+			check := add(ATESTB)
+			check.From, check.To = reg(REG_DL), reg(REG_DL)
+			back := add(AJEQ)
+			back.To.SetTarget(target)
+			if test.multiple {
+				add(obj.AJMP).To.SetTarget(target)
+			}
+			tail := test.tail
+			if test.longExit {
+				tail = 80
+			}
+			if tail != 0 {
+				for i := 0; i < tail; i++ {
+					add(inc).To = reg(REG_AX)
+				}
+			}
+			ret := add(obj.ARET)
+			if exit != nil {
+				exit.To.SetTarget(ret)
+			}
+			span6(ctxt, s, ctxt.NewProg)
+			if ctxt.Errors != 0 {
+				t.Fatalf("assembly reported %d errors", ctxt.Errors)
+			}
+			for p := text; p != nil; p = p.Link {
+				if dst := p.To.Target(); dst != nil {
+					inst, err := x86asm.Decode(s.P[p.Pc:], mode)
+					if err != nil {
+						t.Fatalf("decode branch at %#x: %v", p.Pc, err)
+					}
+					rel, ok := inst.Args[0].(x86asm.Rel)
+					if !ok {
+						t.Fatalf("branch at %#x has argument %T", p.Pc, inst.Args[0])
+					}
+					if got := p.Pc + int64(inst.Len) + int64(rel); got != dst.Pc {
+						t.Fatalf("branch at %#x targets %#x, want %#x", p.Pc, got, dst.Pc)
+					}
+				}
+			}
+			if test.wantSize != 0 && s.Size != test.wantSize {
+				t.Fatalf("function size %d, want %d", s.Size, test.wantSize)
+			}
+			loopSize := back.Pc + int64(back.Isize) - head.Pc
+			if test.wantFit {
+				if size := loopSize; head.Pc&31+size > 31 {
+					t.Fatalf("loop at %#x, size %d crosses its decoded-cache window", head.Pc, size)
+				}
+			} else if aligned := head.Pc%32 == 0; !test.checkOnly && aligned != test.wantAligned {
+				t.Fatalf("loop at %#x, aligned=%v, want %v (body %d bytes)", head.Pc, aligned, test.wantAligned, loopSize)
+			}
+			if test.wantAligned && loopSize > 31 {
+				t.Fatal("aligned loop does not fit in a 32-byte window")
+			}
+		})
 	}
 }
