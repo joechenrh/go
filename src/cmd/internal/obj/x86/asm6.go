@@ -2030,11 +2030,11 @@ type nopPad struct {
 	n int32     // Size of the pad
 }
 
-// smallLoopEnd returns the sole backedge of a short rotated search loop. The
+// findAlignableLoopEnd returns the sole backedge of a short rotated search loop. The
 // other branch must be a forward exit. Calls, nested loops and explicit
 // alignments are excluded. Bound the scan in both bytes and Progs, since
 // metadata instructions can have zero width.
-func smallLoopEnd(head *obj.Prog) *obj.Prog {
+func findAlignableLoopEnd(head *obj.Prog) *obj.Prog {
 	var exit *obj.Prog
 	for p, n := head, 0; p != nil && n < smallLoopAlign; p, n = p.Link, n+1 {
 		if p.Pc+int64(p.Isize)-head.Pc > maxSmallLoopSize ||
@@ -2076,7 +2076,7 @@ func markSmallLoops(s *obj.LSym) (map[*obj.Prog]*obj.Prog, bool) {
 	for head := s.Func().Text; head != nil; head = head.Link {
 		if head.Back&branchLoopHead != 0 && head.Back&branchLoopMultiple == 0 &&
 			prev != nil && (prev.As == obj.AJMP || prev.As == obj.ARET) {
-			if end := smallLoopEnd(head); end != nil {
+			if end := findAlignableLoopEnd(head); end != nil {
 				if loops == nil {
 					loops = make(map[*obj.Prog]*obj.Prog)
 				}
