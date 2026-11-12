@@ -47,21 +47,11 @@ var (
 
 // Instruction layout.
 
-// Loop alignment constants:
-// want to align loop entry to loopAlign-byte boundary,
-// and willing to insert at most maxLoopPad bytes of NOP to do so.
-// We define a loop entry as the target of a backward jump.
-//
-// gcc uses maxLoopPad = 10 for its 'generic x86-64' config,
-// and it aligns all jump targets, not just backward jump targets.
-//
-// As of 6/1/2012, the effect of setting maxLoopPad = 10 here
-// is very slight but negative, so the alignment is disabled by
-// setting MaxLoopPad = 0. The code is here for reference and
-// for future experiments.
+// Keep selected short loops in one 32-byte decoded-cache window, with at most
+// 31 bytes of unreachable padding. Leave one byte spare for branch padding.
 const (
-	loopAlign  = 16
-	maxLoopPad = 0
+	smallLoopAlign   = 32
+	maxSmallLoopSize = smallLoopAlign - 1
 )
 
 // Bit flags that are used to express jump target properties.
@@ -75,6 +65,10 @@ const (
 	// branchLoopHead marks loop entry.
 	// Used to insert padding for misaligned loops.
 	branchLoopHead
+	// branchLoopMultiple marks headers with more than one backedge.
+	branchLoopMultiple
+	// branchLoopAlign marks a selected short loop.
+	branchLoopAlign
 )
 
 // opBytes holds optab encoding bytes.
@@ -2036,6 +2030,89 @@ type nopPad struct {
 	n int32     // Size of the pad
 }
 
+// smallLoopEnd returns the sole backedge of a short rotated search loop. The
+// other branch must be a forward exit. Calls, nested loops and explicit
+// alignments are excluded. Bound the scan in both bytes and Progs, since
+// metadata instructions can have zero width.
+func smallLoopEnd(head *obj.Prog) *obj.Prog {
+	var exit *obj.Prog
+	for p, n := head, 0; p != nil && n < smallLoopAlign; p, n = p.Link, n+1 {
+		if p.Pc+int64(p.Isize)-head.Pc > maxSmallLoopSize ||
+			(p != head && p.Back&branchLoopHead != 0) {
+			return nil
+		}
+		switch p.As {
+		case obj.ACALL, obj.ADUFFCOPY, obj.ADUFFZERO, obj.ARET, obj.APCALIGN, obj.APCALIGNMAX:
+			return nil
+		}
+		if target := p.To.Target(); target != nil {
+			if target == head && p.Back&branchBackwards != 0 {
+				if exit != nil && exit.To.Target().Pc > p.Pc {
+					return p
+				}
+				return nil
+			}
+			if exit != nil || p.As == obj.AJMP || p.Back&branchBackwards != 0 {
+				return nil
+			}
+			exit = p
+		}
+		// Indirect and external jumps terminate this block too.
+		if p.As == obj.AJMP {
+			return nil
+		}
+	}
+	return nil
+}
+
+// markSmallLoops records eligible loops after instruction sizes stabilize.
+// Padding after an unconditional transfer is unreachable. Keep loops that
+// already fit in one window too, so an earlier padding decision cannot silently
+// move them across a boundary. No additional layout pass is needed if all fit.
+func markSmallLoops(s *obj.LSym) (map[*obj.Prog]*obj.Prog, bool) {
+	var loops map[*obj.Prog]*obj.Prog
+	changed := false
+	var prev *obj.Prog
+	for head := s.Func().Text; head != nil; head = head.Link {
+		if head.Back&branchLoopHead != 0 && head.Back&branchLoopMultiple == 0 &&
+			prev != nil && (prev.As == obj.AJMP || prev.As == obj.ARET) {
+			if end := smallLoopEnd(head); end != nil {
+				if loops == nil {
+					loops = make(map[*obj.Prog]*obj.Prog)
+				}
+				loops[head] = end
+				head.Back |= branchLoopAlign
+				size := end.Pc + int64(end.Isize) - head.Pc
+				offset := head.Pc & (smallLoopAlign - 1)
+				changed = changed || offset+size > maxSmallLoopSize
+			}
+		}
+		// Do not skip zero-width labels: an entry through one could execute
+		// padding placed after it.
+		prev = head
+	}
+	return loops, changed
+}
+
+// checkSmallLoops handles exits that widen during layout. Oversized loops are
+// dropped permanently. A surviving loop that no longer fits needs another
+// pass. Decisions only depend on the completed layout, not map iteration order.
+func checkSmallLoops(loops map[*obj.Prog]*obj.Prog) bool {
+	changed := false
+	for head, end := range loops {
+		size := end.Pc + int64(end.Isize) - head.Pc
+		offset := head.Pc & (smallLoopAlign - 1)
+		if size > maxSmallLoopSize {
+			head.Back &^= branchLoopAlign
+			delete(loops, head)
+			changed = true
+		} else if offset+size > maxSmallLoopSize {
+			changed = true
+		}
+	}
+	return changed
+}
+
 func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	if ctxt.Retpoline && ctxt.Arch.Family == sys.I386 {
 		ctxt.Diag("-spectre=ret not supported on 386")
@@ -2092,6 +2169,9 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		p.Back = branchShort // use short branches first time through
 		if q := p.To.Target(); q != nil && (q.Back&branchShort != 0) {
 			p.Back |= branchBackwards
+			if q.Back&branchLoopHead != 0 {
+				q.Back |= branchLoopMultiple
+			}
 			q.Back |= branchLoopHead
 		}
 	}
@@ -2103,6 +2183,10 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	errors := ctxt.Errors
 	var nops []nopPad // Padding for a particular assembly (reuse slice storage if multiple assemblies)
 	nrelocs0 := len(s.R)
+	smallLoopsMarked := false
+	var originalSlot int64
+	alignmentAttempted := false
+	var smallLoops map[*obj.Prog]*obj.Prog
 	for {
 		// This loop continues while there are reasons to re-assemble
 		// whole block, like the presence of long forward jumps.
@@ -2117,18 +2201,16 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		nops = nops[:0]
 		for p := s.Func().Text; p != nil; p = p.Link {
 			c0 := c
-			c = pjc.padJump(ctxt, s, p, c)
-
-			if maxLoopPad > 0 && p.Back&branchLoopHead != 0 && c&(loopAlign-1) != 0 {
-				// pad with NOPs
-				v := -c & (loopAlign - 1)
-
-				if v <= maxLoopPad {
-					s.Grow(int64(c) + int64(v))
-					fillnop(s.P[c:], int(v))
-					c += v
+			if p.Back&branchLoopAlign != 0 {
+				end := smallLoops[p]
+				// These PCs still describe the previous completed layout.
+				size := end.Pc + int64(end.Isize) - p.Pc
+				offset := int64(c) & (smallLoopAlign - 1)
+				if offset+size > maxSmallLoopSize {
+					c = noppad(ctxt, s, c, -c&(smallLoopAlign-1))
 				}
 			}
+			c = pjc.padJump(ctxt, s, p, c)
 
 			p.Pc = int64(c)
 
@@ -2190,6 +2272,32 @@ func span6(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		if n > 1000 {
 			ctxt.Diag("span must be looping")
 			log.Fatalf("loop")
+		}
+		if !reAssemble {
+			if !smallLoopsMarked {
+				smallLoopsMarked = true
+				if !ctxt.IsAsm && ctxt.Arch.Family == sys.AMD64 {
+					originalSlot = (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
+					smallLoops, reAssemble = markSmallLoops(s)
+					alignmentAttempted = reAssemble
+				}
+			} else {
+				reAssemble = checkSmallLoops(smallLoops)
+				// amd64 functions are allocated in 32-byte slots by the linker.
+				// Use existing slack rather than moving unrelated functions.
+				slot := (int64(c) + smallLoopAlign - 1) &^ (smallLoopAlign - 1)
+				if !reAssemble && alignmentAttempted && slot != originalSlot {
+					for p := s.Func().Text; p != nil; p = p.Link {
+						p.Back &^= branchLoopAlign
+						p.Back |= branchShort
+						p.Isize = 0
+						p.Pc = 0
+					}
+					smallLoops = nil
+					alignmentAttempted = false
+					reAssemble = true
+				}
+			}
 		}
 		if !reAssemble {
 			break
