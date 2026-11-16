@@ -499,18 +499,29 @@ func genAMD64(g *gen) {
 
 	// Wide loads mark the upper vector state dirty even when loading zeros.
 	// Only clear that state when every bit VZEROUPPER would modify was zero
-	// in the saved registers. Use GPs here because all GPs are still saved.
+	// in the saved registers. X0 and X1 are scratch registers here: the full
+	// vector state is restored after this check. Use two independent 128-bit
+	// reductions, with AVX encodings to avoid a legacy-SSE transition.
 	checkUpper := func(regs *layout) {
 		p("#ifdef GOEXPERIMENT_simd")
-		p("XORL CX, CX")
+		p("VPXOR X0, X0, X0")
+		p("VPXOR X1, X1, X1")
+		acc := 0
 		for _, seq := range regs.regs[:numXRegs] {
 			r := seq.regs[0]
-			for off := 16; off < r.size; off += 8 {
-				p("ORQ %d(%s), CX", r.pos+off, xReg)
+			for off := 16; off < r.size; off += 16 {
+				p("VPOR %d(%s), X%d, X%d", r.pos+off, xReg, acc, acc)
+				acc ^= 1
 			}
 		}
+		p("VPOR X1, X0, X0")
+		// Keep the predicate in a GP register across the vector restore.
+		p("XORL CX, CX")
+		p("VPTEST X0, X0")
+		p("SETNE CL")
 		p("#endif")
 	}
+
 	clearUpper := func() {
 		p("#ifdef GOEXPERIMENT_simd")
 		p("TESTQ CX, CX")
