@@ -497,13 +497,38 @@ func genAMD64(g *gen) {
 	lXRegs.restore(g)
 	p("JMP restoreGPs")
 
+	// Wide loads mark the upper vector state dirty even when loading zeros.
+	// Only clear that state when every bit VZEROUPPER would modify was zero
+	// in the saved registers. Use GPs here because all GPs are still saved.
+	checkUpper := func(regs *layout) {
+		p("#ifdef GOEXPERIMENT_simd")
+		p("XORL CX, CX")
+		for _, seq := range regs.regs[:numXRegs] {
+			r := seq.regs[0]
+			for off := 16; off < r.size; off += 8 {
+				p("ORQ %d(%s), CX", r.pos+off, xReg)
+			}
+		}
+		p("#endif")
+	}
+	clearUpper := func() {
+		p("#ifdef GOEXPERIMENT_simd")
+		p("TESTQ CX, CX")
+		p("JNE restoreGPs")
+		p("VZEROUPPER")
+		p("#endif")
+		p("JMP restoreGPs")
+	}
+
 	label("restoreAVX:")
+	checkUpper(&lYRegs)
 	lYRegs.restore(g)
-	p("JMP restoreGPs")
+	clearUpper()
 
 	label("restoreAVX512:")
+	checkUpper(&lZRegs)
 	lZRegs.restore(g)
-	p("JMP restoreGPs")
+	clearUpper()
 
 	label("restoreGPs:")
 	p("// Restore GPs")

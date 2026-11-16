@@ -71,6 +71,10 @@ func (l LockRank) String() string {
 
 const PreemptMSupported = preemptMSupported
 
+func AsyncPreemptEnabled() bool {
+	return preemptMSupported && debug.asyncpreemptoff == 0
+}
+
 type LFNode struct {
 	Next    uint64
 	Pushcnt uintptr
