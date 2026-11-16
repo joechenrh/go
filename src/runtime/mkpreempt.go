@@ -499,25 +499,44 @@ func genAMD64(g *gen) {
 
 	// Wide loads mark the upper vector state dirty even when loading zeros.
 	// Only clear that state when every bit VZEROUPPER would modify was zero
-	// in the saved registers. X0 and X1 are scratch registers here: the full
-	// vector state is restored after this check. Use two independent 128-bit
-	// reductions, with AVX encodings to avoid a legacy-SSE transition.
+	// in the saved registers. Vector temporaries are safe here because the
+	// full register state is restored after the check. Use AVX encodings to
+	// avoid a legacy-SSE transition, and independent reduction chains.
 	checkUpper := func(regs *layout) {
 		p("#ifdef GOEXPERIMENT_simd")
-		p("VPXOR X0, X0, X0")
-		p("VPXOR X1, X1, X1")
-		acc := 0
-		for _, seq := range regs.regs[:numXRegs] {
-			r := seq.regs[0]
-			for off := 16; off < r.size; off += 16 {
-				p("VPOR %d(%s), X%d, X%d", r.pos+off, xReg, acc, acc)
-				acc ^= 1
+		if regs == &lZRegs {
+			// Reduce the two 256-bit halves separately, then discard the
+			// low 128 bits before combining the remaining upper 384 bits.
+			p("VXORPS Y0, Y0, Y0")
+			p("VXORPS Y1, Y1, Y1")
+			for _, seq := range regs.regs[:numXRegs] {
+				r := seq.regs[0]
+				p("VORPS %d(%s), Y0, Y0", r.pos, xReg)
+				p("VORPS %d(%s), Y1, Y1", r.pos+32, xReg)
 			}
+			// The 128-bit move zeroes the upper half of Y2, so XOR
+			// clears only the unwanted low half of Y0.
+			p("VMOVAPS X0, X2")
+			p("VXORPS Y2, Y0, Y0")
+			p("VORPS Y1, Y0, Y0")
+			p("XORL CX, CX")
+			p("VPTEST Y0, Y0")
+		} else {
+			p("VPXOR X0, X0, X0")
+			p("VPXOR X1, X1, X1")
+			acc := 0
+			for _, seq := range regs.regs[:numXRegs] {
+				r := seq.regs[0]
+				for off := 16; off < r.size; off += 16 {
+					p("VPOR %d(%s), X%d, X%d", r.pos+off, xReg, acc, acc)
+					acc ^= 1
+				}
+			}
+			p("VPOR X1, X0, X0")
+			p("XORL CX, CX")
+			p("VPTEST X0, X0")
 		}
-		p("VPOR X1, X0, X0")
 		// Keep the predicate in a GP register across the vector restore.
-		p("XORL CX, CX")
-		p("VPTEST X0, X0")
 		p("SETNE CL")
 		p("#endif")
 	}
