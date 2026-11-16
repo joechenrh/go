@@ -13,6 +13,10 @@ import (
 	"testing"
 )
 
+// Keep the vector variables separate so the compiler can keep them in
+// registers across the call-free loop. An array loop could spill them
+// to memory and fail to exercise register restoration.
+//
 //go:noinline
 func spinPreemptSIMD256(stop, entered *atomic.Uint32, input *[12][4]uint64, step *[4]uint64) (result [12][4]uint64, iterations uint64) {
 	v0 := archsimd.LoadUint64x4Array(&input[0])
@@ -59,12 +63,13 @@ func spinPreemptSIMD256(stop, entered *atomic.Uint32, input *[12][4]uint64, step
 	archsimd.ClearAVXUpperBits()
 	return
 }
+
 func TestAsyncPreemptSIMD256(t *testing.T) {
 	if !runtime.AsyncPreemptEnabled() {
 		t.Skip("asynchronous preemption is unavailable or disabled")
 	}
 	if !archsimd.X86.AVX2() {
-		t.Skip("feature unavailable")
+		t.Skip("AVX2 unavailable")
 	}
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	for _, upperLive := range []bool{false, true} {
@@ -202,12 +207,13 @@ func spinPreemptSIMD512(stop, entered *atomic.Uint32, input *[28][8]uint64, step
 	archsimd.ClearAVXUpperBits()
 	return
 }
+
 func TestAsyncPreemptSIMD512(t *testing.T) {
 	if !runtime.AsyncPreemptEnabled() {
 		t.Skip("asynchronous preemption is unavailable or disabled")
 	}
 	if !archsimd.X86.AVX512() {
-		t.Skip("feature unavailable")
+		t.Skip("AVX-512 unavailable")
 	}
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	for _, upperLive := range []bool{false, true} {
@@ -297,12 +303,13 @@ func spinPreemptSIMDFloat256(stop, entered *atomic.Uint32, input *[12][4]float64
 	archsimd.ClearAVXUpperBits()
 	return
 }
+
 func TestAsyncPreemptSIMDFloat256(t *testing.T) {
 	if !runtime.AsyncPreemptEnabled() {
 		t.Skip("asynchronous preemption is unavailable or disabled")
 	}
 	if !archsimd.X86.AVX() {
-		t.Skip("feature unavailable")
+		t.Skip("AVX unavailable")
 	}
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	for _, upperLive := range []bool{false, true} {

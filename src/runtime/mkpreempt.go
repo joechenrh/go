@@ -502,6 +502,8 @@ func genAMD64(g *gen) {
 	// in the saved registers. Vector temporaries are safe here because the
 	// full register state is restored after the check. Use AVX encodings to
 	// avoid a legacy-SSE transition, and independent reduction chains.
+	// VZEROUPPER leaves Z16-Z31 and the mask registers unchanged, so only
+	// check the upper bits of the first numXRegs registers.
 	checkUpper := func(regs *layout) {
 		p("#ifdef GOEXPERIMENT_simd")
 		if regs == &lZRegs {
