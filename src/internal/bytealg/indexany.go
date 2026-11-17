@@ -4,9 +4,11 @@
 
 package bytealg
 
-// IsASCII4 reports whether a short character set contains only ASCII bytes.
-// Callers limit chars to at most four bytes to keep this check inexpensive.
+// IsASCII4 reports whether chars consists of two to four ASCII bytes.
 func IsASCII4(chars string) bool {
+	if len(chars) < 2 || len(chars) > 4 {
+		return false
+	}
 	for i := 0; i < len(chars); i++ {
 		if chars[i] >= 128 {
 			return false

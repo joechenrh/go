@@ -188,9 +188,6 @@ func IndexAny(s, chars string) int {
 		return -1
 	}
 	if len(chars) == 1 {
-		if bytealg.IndexAnyASCII4Supported && chars[0] < utf8.RuneSelf {
-			return IndexByte(s, chars[0])
-		}
 		// Avoid scanning all of s.
 		r := rune(chars[0])
 		if r >= utf8.RuneSelf {
@@ -198,26 +195,11 @@ func IndexAny(s, chars string) int {
 		}
 		return IndexRune(s, r)
 	}
-	if bytealg.IndexAnyASCII4Supported && len(s) <= 1 {
-		if len(s) == 0 {
-			return -1
-		}
-		if s[0] < utf8.RuneSelf {
-			if bytealg.IndexByteString(chars, s[0]) >= 0 {
-				return 0
-			}
-		} else if IndexRune(chars, utf8.RuneError) >= 0 {
-			return 0
-		}
-		return -1
-	}
 	if shouldUseASCIISet(len(s)) {
-		if len(chars) <= 4 && bytealg.IndexAnyASCII4Enabled {
-			if bytealg.IsASCII4(chars) {
-				return bytealg.IndexAnyASCII4String(s, chars)
-			}
-			return indexAnyRune(s, chars)
-		} else if as, isASCII := makeASCIISet(chars); isASCII {
+		if bytealg.IndexAnyASCII4Enabled && bytealg.IsASCII4(chars) {
+			return bytealg.IndexAnyASCII4String(s, chars)
+		}
+		if as, isASCII := makeASCIISet(chars); isASCII {
 			for i := 0; i < len(s); i++ {
 				if as.contains(s[i]) {
 					return i
@@ -228,21 +210,6 @@ func IndexAny(s, chars string) int {
 	}
 	for i, c := range s {
 		if IndexRune(chars, c) >= 0 {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexAnyRune scans a character set known to contain a non-ASCII byte.
-func indexAnyRune(s, chars string) int {
-	for i, c := range s {
-		// An ASCII byte cannot occur within a non-ASCII UTF-8 encoding.
-		if c < utf8.RuneSelf {
-			if bytealg.IndexByteString(chars, byte(c)) >= 0 {
-				return i
-			}
-		} else if IndexRune(chars, c) >= 0 {
 			return i
 		}
 	}

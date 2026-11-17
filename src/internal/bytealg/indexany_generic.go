@@ -6,9 +6,6 @@
 
 package bytealg
 
-// IndexAnyASCII4Supported reports whether the experimental implementation is built.
-const IndexAnyASCII4Supported = false
-
 // IndexAnyASCII4Enabled is false when the SIMD implementation is not built.
 const IndexAnyASCII4Enabled = false
 

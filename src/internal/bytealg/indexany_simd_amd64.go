@@ -13,9 +13,6 @@ import (
 	"unsafe"
 )
 
-// IndexAnyASCII4Supported reports whether the experimental implementation is built.
-const IndexAnyASCII4Supported = true
-
 // IndexAnyASCII4Enabled reports whether the CPU supports the SIMD search.
 var IndexAnyASCII4Enabled = archsimd.X86.AVX2()
 
