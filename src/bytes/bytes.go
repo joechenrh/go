@@ -233,14 +233,24 @@ func IndexAny(s []byte, chars string) int {
 		return -1
 	}
 	if len(chars) == 1 {
+		if bytealg.IndexAnyASCII4Supported && chars[0] < utf8.RuneSelf {
+			return IndexByte(s, chars[0])
+		}
 		r := rune(chars[0])
 		if r >= utf8.RuneSelf {
 			r = utf8.RuneError
 		}
 		return IndexRune(s, r)
 	}
+	if bytealg.IndexAnyASCII4Supported && len(s) == 0 {
+		return -1
+	}
 	if shouldUseASCIISet(len(s)) {
-		if as, isASCII := makeASCIISet(chars); isASCII {
+		if len(chars) <= 4 && bytealg.IndexAnyASCII4Enabled {
+			if bytealg.IsASCII4(chars) {
+				return bytealg.IndexAnyASCII4(s, chars)
+			}
+		} else if as, isASCII := makeASCIISet(chars); isASCII {
 			for i, c := range s {
 				if as.contains(c) {
 					return i
