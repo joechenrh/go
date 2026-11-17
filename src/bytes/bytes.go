@@ -240,7 +240,7 @@ func IndexAny(s []byte, chars string) int {
 		return IndexRune(s, r)
 	}
 	if shouldUseASCIISet(len(s)) {
-		if bytealg.IndexAnyASCII4Enabled && bytealg.IsASCII4(chars) {
+		if bytealg.HaveSIMD && bytealg.IsASCII4(chars) {
 			return bytealg.IndexAnyASCII4(s, chars)
 		}
 		if as, isASCII := makeASCIISet(chars); isASCII {

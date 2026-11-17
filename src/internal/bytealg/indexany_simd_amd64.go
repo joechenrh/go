@@ -13,8 +13,8 @@ import (
 	"unsafe"
 )
 
-// IndexAnyASCII4Enabled reports whether the CPU supports the SIMD search.
-var IndexAnyASCII4Enabled = archsimd.X86.AVX2()
+// HaveSIMD reports whether the CPU supports the SIMD IndexAny search.
+var HaveSIMD = archsimd.X86.AVX2()
 
 // IndexAnyASCII4 searches for two to four ASCII bytes. The caller must ensure
 // AVX2 is enabled, len(s) > 8, 2 <= len(chars) <= 4, and chars is ASCII.

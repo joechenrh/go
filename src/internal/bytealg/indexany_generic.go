@@ -6,8 +6,8 @@
 
 package bytealg
 
-// IndexAnyASCII4Enabled is false when the SIMD implementation is not built.
-const IndexAnyASCII4Enabled = false
+// HaveSIMD is false when the SIMD IndexAny implementation is not built.
+const HaveSIMD = false
 
 // IndexAnyASCII4 is unavailable when the specialized search is not built.
 func IndexAnyASCII4(s []byte, chars string) int { panic("unreachable") }
