@@ -196,6 +196,9 @@ func IndexAny(s, chars string) int {
 		return IndexRune(s, r)
 	}
 	if shouldUseASCIISet(len(s)) {
+		if bytealg.HaveSIMD && bytealg.IsASCII4(chars) {
+			return bytealg.IndexAnyASCII4String(s, chars)
+		}
 		if as, isASCII := makeASCIISet(chars); isASCII {
 			for i := 0; i < len(s); i++ {
 				if as.contains(s[i]) {
